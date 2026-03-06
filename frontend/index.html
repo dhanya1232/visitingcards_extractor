@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Visiting Card Extractor</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="logo">
+                <i class="fa-solid fa-address-card"></i>
+                <h1>Card<span class="highlight">Extract</span> AI</h1>
+            </div>
+            <p>Upload visiting cards to instantly convert them into structured contacts</p>
+        </header>
+
+        <main>
+            <section class="upload-section">
+                <div class="drop-zone" id="drop-zone">
+                    <input type="file" id="file-input" multiple accept="image/*" hidden>
+                    <i class="fa-solid fa-cloud-arrow-up drop-icon"></i>
+                    <h2>Drag & Drop Images</h2>
+                    <p>or</p>
+                    <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">Browse Files</button>
+                    <p class="file-info">Supports JPEG, PNG, WEBP (Multiple files allowed)</p>
+                </div>
+            </section>
+
+            <section class="processing-section hidden" id="processing-section">
+                <div class="loader">
+                    <div class="spinner"></div>
+                    <p id="processing-status">Analyzing cards with Gemini AI...</p>
+                </div>
+            </section>
+
+            <section class="results-section hidden" id="results-section">
+                <div class="results-header">
+                    <h2>Extracted Contacts</h2>
+                    <button class="btn btn-success" id="export-excel-btn">
+                        <i class="fa-solid fa-file-excel"></i> Export to Excel
+                    </button>
+                </div>
+                
+                <div class="table-container">
+                    <table id="results-table">
+                        <thead>
+                            <tr>
+                                <th>Preview</th>
+                                <th>Company</th>
+                                <th>Owner</th>
+                                <th>Phone</th>
+                                <th>Email</th>
+                                <th>Address</th>
+                                <th>City</th>
+                                <th>State</th>
+                                <th>Pincode</th>
+                                <th>Extra Info</th>
+                            </tr>
+                        </thead>
+                        <tbody id="results-body">
+                            <!-- Rows will be injected here via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+        
+        <footer>
+            <p></p>
+        </footer>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
