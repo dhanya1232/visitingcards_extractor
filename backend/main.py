@@ -1,23 +1,29 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import pandas as pd
 from io import BytesIO
-from google import genai
+import google.genai as genai
 import os
 import json
+import re
 from PIL import Image
 from dotenv import load_dotenv
+from openpyxl.utils import get_column_letter
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from .env in the same directory as this file
+current_dir = os.path.dirname(os.path.abspath(__file__))
+env_path = os.path.join(current_dir, ".env")
+load_dotenv(env_path)
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
     print("WARNING: GEMINI_API_KEY not found in environment!")
 else:
-    print(f"DEBUG: GEMINI_API_KEY loaded successfully.")
+    print(f"DEBUG: GEMINI_API_KEY loaded successfully (starts with {GEMINI_API_KEY[:5]}...).")
 
 app = FastAPI()
 
@@ -104,13 +110,19 @@ async def extract_card(file: UploadFile = File(...)):
         text = response.text.strip()
         print(f"DEBUG: Raw response received (first 100 chars): {text[:100]}...")
         
-        # Clean up any potential markdown formatting
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
+        # Robust JSON extraction using regex
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            text = json_match.group(0)
+            print("DEBUG: Found JSON block using regex.")
+        else:
+            # Fallback for simple stripping
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
             
         data = json.loads(text.strip())
         # Attach the filename so frontend knows which file this belongs to
@@ -146,15 +158,28 @@ async def export_excel(payload: ExcelRequest):
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Contacts')
             
+            # Access the workbook and sheet for formatting
+            workbook = writer.book
+            worksheet = workbook['Contacts']
+            
             # Auto-adjust column widths
-            worksheet = writer.sheets['Contacts']
-            for column_cells in worksheet.columns:
-                length = max(len(str(cell.value) or "") for cell in column_cells)
-                worksheet.column_dimensions[column_cells[0].column_letter].width = length + 2
+            for i, column_cells in enumerate(worksheet.columns, 1):
+                max_length = 0
+                for cell in column_cells:
+                    try:
+                        if cell.value:
+                            val_len = len(str(cell.value))
+                            if val_len > max_length:
+                                max_length = val_len
+                    except:
+                        pass
+                
+                # Add a little buffer for padding
+                adjusted_width = (max_length + 2)
+                worksheet.column_dimensions[get_column_letter(i)].width = min(adjusted_width, 50) # Cap at 50 chars for readability
 
         output.seek(0)
         
-        from fastapi.responses import StreamingResponse
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

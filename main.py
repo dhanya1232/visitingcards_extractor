@@ -1,16 +1,33 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import pandas as pd
 from io import BytesIO
-from google import genai
+import google.genai as genai
 import os
 import json
+import re
 from PIL import Image
 from dotenv import load_dotenv
+from openpyxl.utils import get_column_letter
 
-load_dotenv()
+# Load environment variables
+env_file_loaded = "None"
+if os.path.exists(".env"):
+    load_dotenv(".env")
+    env_file_loaded = ".env (root)"
+elif os.path.exists("backend/.env"):
+    load_dotenv("backend/.env")
+    env_file_loaded = "backend/.env"
+else:
+    load_dotenv()
+    env_file_loaded = "default"
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+print(f"DEBUG: Loaded environment from: {env_file_loaded}")
 
 app = FastAPI()
 
@@ -22,14 +39,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# You can set this in a .env file or environment variable
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-print(f"Loaded GEMINI_API_KEY: {'YES' if GEMINI_API_KEY else 'NO'}")
-if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-else:
+# Initialize Gemini Client
+try:
+    if GEMINI_API_KEY:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        key_preview = f"{GEMINI_API_KEY[:5]}...{GEMINI_API_KEY[-4:]}" if len(GEMINI_API_KEY) > 10 else "too short"
+        print(f"DEBUG: Gemini Client initialized with key prefix: {key_preview}")
+    else:
+        client = None
+        print("WARNING: GEMINI_API_KEY not found!")
+except Exception as e:
+    print(f"ERROR initializing Gemini client: {e}")
     client = None
-
 
 PROMPT = """
 You are an expert OCR and data extraction system.
@@ -62,40 +83,77 @@ JSON Format:
 }
 """
 
-@app.get("/")
-def read_root():
-    return {"message": "Backend is running! Please open frontend/index.html in your browser to use the application. You can view the API documentation at http://127.0.0.1:8000/docs"}
-
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "gemini_ready": client is not None}
 
 @app.post("/extract")
 async def extract_card(file: UploadFile = File(...)):
+    print(f"DEBUG: Received extraction request for file: {file.filename}")
+    
     if not client:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured in backend.")
+        raise HTTPException(status_code=500, detail="Gemini API key is not configured.")
         
     try:
         image_data = await file.read()
         img = Image.open(BytesIO(image_data))
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=[PROMPT, img]
-        )
         
-        text = response.text.strip()
-        # Clean up any potential markdown formatting
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-            
-        data = json.loads(text.strip())
-        # Attach the filename so frontend knows which file this belongs to
-        data["_filename"] = file.filename
-        return data
+        # Try different models in case of quota issues
+        # Based on list_ids.py output: ['gemini-2.5-flash', 'gemini-2.0-flash-001', 'gemini-2.0-flash']
+        models_to_try = [
+            'gemini-2.5-flash', 
+            'gemini-2.0-flash-001', 
+            'gemini-2.0-flash'
+        ]
+        
+        last_error = "Unknown error"
+        
+        for model_id in models_to_try:
+            try:
+                print(f"DEBUG: Trying extraction with model: {model_id}")
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=[PROMPT, img]
+                )
+                
+                if not response.text:
+                    print(f"WARNING: Model {model_id} returned empty text.")
+                    continue
+                    
+                text = response.text.strip()
+                
+                # Robust JSON extraction
+                json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                if json_match:
+                    text = json_match.group(0)
+                else:
+                    text = text.replace("```json", "").replace("```", "").strip()
+                    
+                data = json.loads(text)
+                data["_filename"] = file.filename
+                print(f"DEBUG: Extraction successful with model: {model_id}")
+                return data
+                
+            except Exception as model_err:
+                last_error = str(model_err)
+                print(f"WARNING: Model {model_id} failed: {last_error}")
+                # If it's a 429 or 404, we continue to try the next model
+                if "429" in last_error or "404" in last_error or "quota" in last_error.lower() or "not found" in last_error.lower():
+                    continue
+                else:
+                    # For other critical errors, we stop
+                    break
+        
+        # If we got here, all models failed
+        raise Exception(f"All models failed. Last error: {last_error}")
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"CRITICAL Extraction error: {e}")
+        error_msg = str(e)
+        if "429" in error_msg or "quota" in error_msg.lower():
+            error_msg = "Quota Exceeded: All available free-tier models have reached their daily limit. Please try again later or wait 60 seconds."
+        
+        raise HTTPException(status_code=500, detail=error_msg)
 
 class ExcelRequest(BaseModel):
     data: List[Dict[str, Any]]
@@ -103,26 +161,22 @@ class ExcelRequest(BaseModel):
 @app.post("/export-excel")
 async def export_excel(payload: ExcelRequest):
     try:
-        # Create DataFrame from the list of dictionaries
         df = pd.DataFrame(payload.data)
-        
-        # Remove custom fields used in UI
         if "_filename" in df.columns:
             df = df.drop(columns=["_filename"])
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Contacts')
-            
-            # Auto-adjust column widths
-            worksheet = writer.sheets['Contacts']
-            for column_cells in worksheet.columns:
-                length = max(len(str(cell.value) or "") for cell in column_cells)
-                worksheet.column_dimensions[column_cells[0].column_letter].width = length + 2
+            worksheet = writer.book['Contacts']
+            for i, column_cells in enumerate(worksheet.columns, 1):
+                max_length = 0
+                for cell in column_cells:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                worksheet.column_dimensions[get_column_letter(i)].width = min(max_length + 2, 50)
 
         output.seek(0)
-        
-        from fastapi.responses import StreamingResponse
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -131,6 +185,6 @@ async def export_excel(payload: ExcelRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+# Static files mounting
+if os.path.exists("frontend"):
+    app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
